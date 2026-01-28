@@ -7,6 +7,7 @@ const { Server } = require("socket.io");
 require("dotenv").config();
 
 const authRoutes = require("./src/routes/auth");
+const setupSocketHandlers = require("./src/utils/socketHandler");
 
 const app = express();
 const server = http.createServer(app);
@@ -125,43 +126,8 @@ app.get("/api/session/:sessionId", (req, res) => {
 /* ================================
    ✅ SOCKET.IO LOGIC
 ================================ */
-const activeQRSessions = new Map();
 
-io.on("connection", (socket) => {
-  console.log("🔌 Client connected:", socket.id);
-
-  socket.on("qr-generated", ({ sessionId, type }) => {
-    activeQRSessions.set(sessionId, {
-      socketId: socket.id,
-      type,
-    });
-    console.log(`📱 QR Session created: ${sessionId} (${type})`);
-  });
-
-  socket.on("face-captured", (data) => {
-    const { sessionId, faceDescriptor, email, password } = data;
-    const session = activeQRSessions.get(sessionId);
-
-    if (session) {
-      console.log(`✅ Face verified for session: ${sessionId}`);
-
-      io.to(session.socketId).emit("face-verified", {
-        success: true,
-        faceDescriptor,
-        email,
-        password,
-      });
-
-      activeQRSessions.delete(sessionId);
-    } else {
-      console.log(`❌ Session not found: ${sessionId}`);
-    }
-  });
-
-  socket.on("disconnect", () => {
-    console.log("🔌 Client disconnected:", socket.id);
-  });
-});
+setupSocketHandlers(io);
 
 /* ================================
    ✅ SERVER START
