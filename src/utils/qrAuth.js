@@ -1,70 +1,127 @@
-const { v4: uuidv4 } = require('uuid');
-
-// In-memory store for pending authentications (production me Redis use karo)
-const pendingAuths = new Map();
+// backend/src/utils/qrAuth.js
+// FIXED: QR Auth Manager with proper session handling
 
 class QRAuthManager {
-  // Generate unique session for QR login
-  static generateAuthSession(userId) {
-    const sessionId = uuidv4();
-    const authData = {
-      sessionId,
+  constructor() {
+    this.sessions = new Map();
+    // Auto-cleanup old sessions
+    setInterval(() => {
+      this.cleanupExpiredSessions();
+    }, 60000); // Every minute
+  }
+
+  // Generate auth session
+  generateAuthSession(userId, email = null) {
+    const sessionId = this.generateSessionId();
+    const session = {
       userId,
+      email,
       status: 'pending',
       createdAt: Date.now(),
-      expiresAt: Date.now() + 5 * 60 * 1000 // 5 minutes
+      expiresAt: Date.now() + (10 * 60 * 1000), // 10 minutes
     };
     
-    pendingAuths.set(sessionId, authData);
-    
-    // Auto-cleanup after expiry
-    setTimeout(() => {
-      pendingAuths.delete(sessionId);
-    }, 5 * 60 * 1000);
+    this.sessions.set(sessionId, session);
+    console.log(' QR Session created:', sessionId);
     
     return sessionId;
   }
-  
-  // Get auth session
-  static getAuthSession(sessionId) {
-    const session = pendingAuths.get(sessionId);
+
+  // Get session
+  getAuthSession(sessionId) {
+    const session = this.sessions.get(sessionId);
     
-    if (!session) return null;
+    if (!session) {
+      return null;
+    }
     
     // Check if expired
     if (Date.now() > session.expiresAt) {
-      pendingAuths.delete(sessionId);
+      this.sessions.delete(sessionId);
       return null;
     }
     
     return session;
   }
-  
-  // Update session status
-  static updateAuthStatus(sessionId, status, data = {}) {
-    const session = pendingAuths.get(sessionId);
+
+  // Update session status (IMPORTANT FOR LOGIN)
+  updateAuthStatus(sessionId, status, additionalData = {}) {
+    const session = this.sessions.get(sessionId);
     
-    if (!session) return false;
+    if (!session) {
+      console.error('❌ Session not found:', sessionId);
+      return false;
+    }
     
     session.status = status;
-    session.updatedAt = Date.now();
-    Object.assign(session, data);
+    Object.assign(session, additionalData);
     
-    pendingAuths.set(sessionId, session);
+    this.sessions.set(sessionId, session);
+    console.log(' Session updated:', sessionId, 'Status:', status);
+    
     return true;
   }
-  
-  // Complete authentication
-  static completeAuth(sessionId) {
-    const session = pendingAuths.get(sessionId);
+
+  // Complete authentication (for login)
+  completeAuth(sessionId) {
+    const session = this.sessions.get(sessionId);
     
-    if (!session || session.status !== 'verified') {
+    if (!session) {
+      console.error('❌ Session not found:', sessionId);
       return null;
     }
     
-    pendingAuths.delete(sessionId);
+    if (session.status !== 'verified') {
+      console.error('❌ Session not verified:', sessionId, 'Status:', session.status);
+      return null;
+    }
+    
+    // Mark as completed
+    session.status = 'completed';
+    this.sessions.set(sessionId, session);
+    
+    console.log(' Auth completed:', sessionId);
+    
+    // Delete session after a delay (optional)
+    setTimeout(() => {
+      this.sessions.delete(sessionId);
+      console.log('🗑️ Session deleted:', sessionId);
+    }, 30000); // Delete after 30 seconds
+    
     return session;
+  }
+
+  // Cleanup expired sessions
+  cleanupExpiredSessions() {
+    const now = Date.now();
+    let cleaned = 0;
+    
+    for (const [sessionId, session] of this.sessions.entries()) {
+      if (now > session.expiresAt) {
+        this.sessions.delete(sessionId);
+        cleaned++;
+      }
+    }
+    
+    if (cleaned > 0) {
+      console.log(`🗑️ Cleaned ${cleaned} expired sessions`);
+    }
+  }
+
+  // Generate unique session ID
+  generateSessionId() {
+    return 'qr_' + Math.random().toString(36).substring(2, 15) + 
+           Math.random().toString(36).substring(2, 15);
+  }
+
+  // Get all sessions (for debugging)
+  getAllSessions() {
+    return Array.from(this.sessions.entries()).map(([id, session]) => ({
+      sessionId: id,
+      ...session
+    }));
   }
 }
 
-module.exports = QRAuthManager;
+// Export singleton instance
+module.exports = new QRAuthManager();

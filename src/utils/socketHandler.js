@@ -1,7 +1,8 @@
-// Backend: socket/socketHandler.js
-// Socket.io event handlers for face verification
+// backend/src/utils/socketHandler.js
+// FIXED: Socket handler that properly updates QRAuthManager sessions
 
 const User = require('../models/User');
+const QRAuthManager = require('./qrAuth');
 
 // Euclidean distance function
 function euclideanDistance(desc1, desc2) {
@@ -87,8 +88,20 @@ function setupSocketHandlers(io) {
             return;
           }
 
-          // Face matched!
-          console.log('✅ Face matched! Login approved');
+          //  FACE MATCHED! 
+          console.log(' Face matched! Login approved');
+
+          //  CRITICAL FIX: Update QRAuthManager session status to 'verified'
+          // This is what was missing! Without this, /api/auth/login/complete returns 401
+          QRAuthManager.updateAuthStatus(sessionId, 'verified', {
+            userId: user._id.toString(),
+            email: user.email,
+            verifiedAt: Date.now(),
+            matchDistance: distance
+          });
+          console.log(' QRAuthManager session updated to VERIFIED');
+
+          // Emit success to desktop
           io.to(sessionId).emit('face-verification-complete', {
             sessionId,
             success: true,
@@ -99,7 +112,7 @@ function setupSocketHandlers(io) {
 
         } else if (type === 'register') {
           // REGISTRATION: Just send face descriptor back
-          console.log('✅ Face captured for registration');
+          console.log(' Face captured for registration');
           io.to(sessionId).emit('face-verified', {
             sessionId,
             success: true,
