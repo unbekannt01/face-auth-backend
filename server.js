@@ -17,7 +17,7 @@ const server = http.createServer(app);
 const allowedOrigins = [
   "http://localhost:3000",
   "http://192.168.1.100:3000",
-  "https://face-auth-sandy.vercel.app"
+  "https://face-auth-frontend-lake.vercel.app"
 ];
 
 /* ================================
