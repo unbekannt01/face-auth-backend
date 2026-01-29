@@ -1,15 +1,15 @@
 // backend/src/utils/socketHandler.js
-// FIXED: Socket handler that properly updates QRAuthManager sessions
+// FINAL FIXED: Proper QRAuthManager session handling
 
 const User = require('../models/User');
 const QRAuthManager = require('./qrAuth');
 
-// Euclidean distance function
+// Euclidean distance
 function euclideanDistance(desc1, desc2) {
   if (!desc1 || !desc2 || desc1.length !== desc2.length) {
     return Infinity;
   }
-  
+
   let sum = 0;
   for (let i = 0; i < desc1.length; i++) {
     sum += Math.pow(desc1[i] - desc2[i], 2);
@@ -18,130 +18,110 @@ function euclideanDistance(desc1, desc2) {
 }
 
 function setupSocketHandlers(io) {
-  // Store active sessions
   const activeSessions = new Map();
 
   io.on('connection', (socket) => {
     console.log('🔌 Client connected:', socket.id);
 
-    // QR Code generated - desktop sends this
+    /* ============================
+       QR GENERATED (DESKTOP)
+    ============================ */
     socket.on('qr-generated', (data) => {
       const { sessionId, type, email } = data;
-      console.log('📱 QR generated for session:', sessionId, 'Type:', type);
-      
+
+      console.log('📱 QR generated:', sessionId, type);
+
       activeSessions.set(sessionId, {
         socketId: socket.id,
-        type: type,
-        email: email,
+        type,
+        email,
         timestamp: Date.now()
       });
 
-      // Join room for this session
       socket.join(sessionId);
     });
 
-    // Face captured from mobile
+    /* ============================
+       FACE CAPTURED (MOBILE)
+    ============================ */
     socket.on('face-captured', async (data) => {
-      const { sessionId, faceDescriptor, email, password, type } = data;
-      
-      console.log('📸 Face captured for session:', sessionId);
-      console.log('Type:', type, 'Email:', email);
+      const { sessionId, faceDescriptor, email, type } = data;
+
+      console.log('📸 Face captured:', sessionId, type);
 
       try {
         if (type === 'login') {
-          // LOGIN: Verify face matches registered user
           const user = await User.findOne({ email: email.toLowerCase() });
 
           if (!user) {
-            console.log('❌ User not found:', email);
-            io.to(sessionId).emit('face-verification-complete', {
-              sessionId,
+            return io.to(sessionId).emit('face-verification-complete', {
               success: false,
               message: 'User not found'
             });
-            return;
           }
 
-          if (!user.faceDescriptor || user.faceDescriptor.length === 0) {
-            console.log('❌ No face data for user:', email);
-            io.to(sessionId).emit('face-verification-complete', {
-              sessionId,
+          if (!user.faceDescriptor?.length) {
+            return io.to(sessionId).emit('face-verification-complete', {
               success: false,
-              message: 'No face data registered'
+              message: 'No face registered'
             });
-            return;
           }
 
-          // Compare faces
           const distance = euclideanDistance(user.faceDescriptor, faceDescriptor);
           const threshold = 0.6;
 
-          console.log('🔍 Face comparison - Distance:', distance, 'Threshold:', threshold);
+          console.log('🔍 Distance:', distance);
 
           if (distance > threshold) {
-            console.log('❌ Face does not match!');
-            io.to(sessionId).emit('face-verification-complete', {
-              sessionId,
+            return io.to(sessionId).emit('face-verification-complete', {
               success: false,
-              message: 'Face does not match registered face. Please try again.'
+              message: 'Face does not match'
             });
-            return;
           }
 
-          //  FACE MATCHED! 
-          console.log(' Face matched! Login approved');
-
-          //  CRITICAL FIX: Update QRAuthManager session status to 'verified'
-          // This is what was missing! Without this, /api/auth/login/complete returns 401
-          const updateSuccess = QRAuthManager.updateAuthStatus(sessionId, 'verified', {
+          // 🔥 CRITICAL FIX
+          const updated = QRAuthManager.updateAuthStatus(sessionId, 'verified', {
             userId: user._id.toString(),
             email: user.email,
             verifiedAt: Date.now(),
             matchDistance: distance
           });
-          
-          if (updateSuccess) {
-            console.log(' QRAuthManager session updated to VERIFIED');
-          } else {
-            console.error(' Failed to update QRAuthManager session!');
-          }
 
-          // Emit success to desktop
-          io.to(sessionId).emit('face-verification-complete', {
-            sessionId,
+          console.log(updated 
+            ? '✅ QR session VERIFIED' 
+            : '❌ QR session update FAILED');
+
+          return io.to(sessionId).emit('face-verification-complete', {
             success: true,
-            faceDescriptor: faceDescriptor,
-            email: email,
             userId: user._id.toString(),
+            email: user.email,
             message: 'Face verified successfully'
           });
+        }
 
-        } else if (type === 'register') {
-          // REGISTRATION: Just send face descriptor back
-          console.log(' Face captured for registration');
-          io.to(sessionId).emit('face-verified', {
-            sessionId,
+        if (type === 'register') {
+          return io.to(sessionId).emit('face-verified', {
             success: true,
-            faceDescriptor: faceDescriptor,
+            faceDescriptor,
             message: 'Face captured successfully'
           });
         }
 
-      } catch (error) {
-        console.error('❌ Face verification error:', error);
+      } catch (err) {
+        console.error('❌ Face verification error:', err);
         io.to(sessionId).emit('face-verification-complete', {
-          sessionId,
           success: false,
-          message: 'Verification failed. Please try again.'
+          message: 'Verification failed'
         });
       }
     });
 
-    // Client disconnect
+    /* ============================
+       DISCONNECT
+    ============================ */
     socket.on('disconnect', () => {
       console.log('🔌 Client disconnected:', socket.id);
-      
-      // Clean up sessions for this socket
+
       for (const [sessionId, session] of activeSessions.entries()) {
         if (session.socketId === socket.id) {
           activeSessions.delete(sessionId);
@@ -150,14 +130,16 @@ function setupSocketHandlers(io) {
     });
   });
 
-  // Clean up old sessions every 5 minutes
+  /* ============================
+     CLEANUP EXPIRED SESSIONS
+  ============================ */
   setInterval(() => {
     const now = Date.now();
-    const timeout = 10 * 60 * 1000; // 10 minutes
-    
+    const timeout = 10 * 60 * 1000;
+
     for (const [sessionId, session] of activeSessions.entries()) {
       if (now - session.timestamp > timeout) {
-        console.log('🗑️ Cleaning up old session:', sessionId);
+        console.log('🗑️ Cleaning expired session:', sessionId);
         activeSessions.delete(sessionId);
       }
     }

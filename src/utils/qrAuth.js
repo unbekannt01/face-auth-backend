@@ -123,5 +123,9 @@ class QRAuthManager {
   }
 }
 
-// Export singleton instance
-module.exports = new QRAuthManager();
+// Create singleton instance
+const qrAuthManager = new QRAuthManager();
+
+// Export with sessions exposed for emergency fixes
+module.exports = qrAuthManager;
+module.exports.QRAuthManager = QRAuthManager;
