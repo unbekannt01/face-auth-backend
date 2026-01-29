@@ -22,12 +22,12 @@ function setupSocketHandlers(io) {
   const activeSessions = new Map();
 
   io.on('connection', (socket) => {
-    console.log('🔌 Client connected:', socket.id);
+    console.log(' Client connected:', socket.id);
 
     // QR Code generated - desktop sends this
     socket.on('qr-generated', (data) => {
       const { sessionId, type, email } = data;
-      console.log('📱 QR generated for session:', sessionId, 'Type:', type);
+      console.log(' QR generated for session:', sessionId, 'Type:', type);
       
       activeSessions.set(sessionId, {
         socketId: socket.id,
@@ -44,7 +44,7 @@ function setupSocketHandlers(io) {
     socket.on('face-captured', async (data) => {
       const { sessionId, faceDescriptor, email, password, type } = data;
       
-      console.log('📸 Face captured for session:', sessionId);
+      console.log(' Face captured for session:', sessionId);
       console.log('Type:', type, 'Email:', email);
 
       try {
@@ -53,7 +53,7 @@ function setupSocketHandlers(io) {
           const user = await User.findOne({ email: email.toLowerCase() });
 
           if (!user) {
-            console.log('❌ User not found:', email);
+            console.log(' User not found:', email);
             io.to(sessionId).emit('face-verification-complete', {
               sessionId,
               success: false,
@@ -63,7 +63,7 @@ function setupSocketHandlers(io) {
           }
 
           if (!user.faceDescriptor || user.faceDescriptor.length === 0) {
-            console.log('❌ No face data for user:', email);
+            console.log(' No face data for user:', email);
             io.to(sessionId).emit('face-verification-complete', {
               sessionId,
               success: false,
@@ -76,10 +76,10 @@ function setupSocketHandlers(io) {
           const distance = euclideanDistance(user.faceDescriptor, faceDescriptor);
           const threshold = 0.6;
 
-          console.log('🔍 Face comparison - Distance:', distance, 'Threshold:', threshold);
+          console.log(' Face comparison - Distance:', distance, 'Threshold:', threshold);
 
           if (distance > threshold) {
-            console.log('❌ Face does not match!');
+            console.log(' Face does not match!');
             io.to(sessionId).emit('face-verification-complete', {
               sessionId,
               success: false,
@@ -128,7 +128,7 @@ function setupSocketHandlers(io) {
         }
 
       } catch (error) {
-        console.error('❌ Face verification error:', error);
+        console.error(' Face verification error:', error);
         io.to(sessionId).emit('face-verification-complete', {
           sessionId,
           success: false,
@@ -139,7 +139,7 @@ function setupSocketHandlers(io) {
 
     // Client disconnect
     socket.on('disconnect', () => {
-      console.log('🔌 Client disconnected:', socket.id);
+      console.log(' Client disconnected:', socket.id);
       
       // Clean up sessions for this socket
       for (const [sessionId, session] of activeSessions.entries()) {

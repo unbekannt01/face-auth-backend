@@ -49,7 +49,7 @@ class QRAuthManager {
     const session = this.sessions.get(sessionId);
     
     if (!session) {
-      console.error('❌ Session not found:', sessionId);
+      console.error(' Session not found:', sessionId);
       return false;
     }
     
@@ -67,12 +67,12 @@ class QRAuthManager {
     const session = this.sessions.get(sessionId);
     
     if (!session) {
-      console.error('❌ Session not found:', sessionId);
+      console.error(' Session not found:', sessionId);
       return null;
     }
     
     if (session.status !== 'verified') {
-      console.error('❌ Session not verified:', sessionId, 'Status:', session.status);
+      console.error(' Session not verified:', sessionId, 'Status:', session.status);
       return null;
     }
     

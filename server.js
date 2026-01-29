@@ -16,7 +16,7 @@ const app = express();
 const server = http.createServer(app);
 
 /* ================================
-   ✅ ALLOWED ORIGINS (LOCAL + PROD)
+    ALLOWED ORIGINS (LOCAL + PROD)
 ================================ */
 const allowedOrigins = [
   "http://localhost:3000",
@@ -25,7 +25,7 @@ const allowedOrigins = [
 ];
 
 /* ================================
-   ✅ EXPRESS CORS (REST APIs)
+    EXPRESS CORS (REST APIs)
 ================================ */
 app.use(
   cors({
@@ -45,7 +45,7 @@ app.use(express.json({ limit: "50mb" }));
 app.use(express.urlencoded({ limit: "50mb", extended: true }));
 
 /* ================================
-   ✅ SOCKET.IO WITH CORS
+    SOCKET.IO WITH CORS
 ================================ */
 const io = new Server(server, {
   cors: {
@@ -56,15 +56,15 @@ const io = new Server(server, {
 });
 
 /* ================================
-   ✅ MONGODB CONNECTION
+    MONGODB CONNECTION
 ================================ */
 mongoose
   .connect(process.env.MONGODB_URI)
-  .then(() => console.log("✅ MongoDB Connected"))
-  .catch((err) => console.error("❌ MongoDB Error:", err));
+  .then(() => console.log(" MongoDB Connected"))
+  .catch((err) => console.error(" MongoDB Error:", err));
 
 /* ================================
-   ✅ TEMP SESSION STORAGE (for QR data)
+    TEMP SESSION STORAGE (for QR data)
 ================================ */
 const sessions = new Map();
 
@@ -80,13 +80,13 @@ setInterval(() => {
 }, 60000);
 
 /* ================================
-   ✅ ROUTES
+    ROUTES
 ================================ */
 app.use("/api/auth", authRoutes);
 
 // Health check
 app.get("/", (req, res) => {
-  res.json({ message: "🚀 Face Auth Backend Running!" });
+  res.json({ message: " Face Auth Backend Running!" });
 });
 
 // Create session (for QR data storage)
@@ -108,7 +108,7 @@ app.post("/api/session/create", (req, res) => {
     timestamp: Date.now(),
   });
 
-  console.log(`💾 Session created: ${sessionId} (${type})`);
+  console.log(` Session created: ${sessionId} (${type})`);
   res.json({ success: true, sessionId });
 });
 
@@ -128,7 +128,7 @@ app.get("/api/session/:sessionId", (req, res) => {
 });
 
 /* ================================
-   ✅ SOCKET.IO HANDLERS WITH QRAuthManager
+    SOCKET.IO HANDLERS WITH QRAuthManager
 ================================ */
 
 // Helper function
@@ -145,12 +145,12 @@ function euclideanDistance(desc1, desc2) {
 }
 
 io.on('connection', (socket) => {
-  console.log('🔌 Client connected:', socket.id);
+  console.log(' Client connected:', socket.id);
 
   // QR Code generated - desktop sends this
   socket.on('qr-generated', (data) => {
     const { sessionId, type, email } = data;
-    console.log('📱 QR generated for session:', sessionId, 'Type:', type);
+    console.log(' QR generated for session:', sessionId, 'Type:', type);
     
     // Join room for this session
     socket.join(sessionId);
@@ -160,7 +160,7 @@ io.on('connection', (socket) => {
   socket.on('face-captured', async (data) => {
     const { sessionId, faceDescriptor, email, password, type } = data;
     
-    console.log('📸 Face captured for session:', sessionId);
+    console.log(' Face captured for session:', sessionId);
     console.log('Type:', type, 'Email:', email);
 
     try {
@@ -169,7 +169,7 @@ io.on('connection', (socket) => {
         const user = await User.findOne({ email: email.toLowerCase() });
 
         if (!user) {
-          console.log('❌ User not found:', email);
+          console.log(' User not found:', email);
           io.to(sessionId).emit('face-verification-complete', {
             sessionId,
             success: false,
@@ -179,7 +179,7 @@ io.on('connection', (socket) => {
         }
 
         if (!user.faceDescriptor || user.faceDescriptor.length === 0) {
-          console.log('❌ No face data for user:', email);
+          console.log(' No face data for user:', email);
           io.to(sessionId).emit('face-verification-complete', {
             sessionId,
             success: false,
@@ -192,10 +192,10 @@ io.on('connection', (socket) => {
         const distance = euclideanDistance(user.faceDescriptor, faceDescriptor);
         const threshold = 0.6;
 
-        console.log('🔍 Face comparison - Distance:', distance, 'Threshold:', threshold);
+        console.log(' Face comparison - Distance:', distance, 'Threshold:', threshold);
 
         if (distance > threshold) {
-          console.log('❌ Face does not match!');
+          console.log(' Face does not match!');
           io.to(sessionId).emit('face-verification-complete', {
             sessionId,
             success: false,
@@ -204,8 +204,8 @@ io.on('connection', (socket) => {
           return;
         }
 
-        // ✅ FACE MATCHED!
-        console.log('✅ Face matched! Login approved');
+        //  FACE MATCHED!
+        console.log(' Face matched! Login approved');
 
         // First try to get existing QR session to verify it exists
         let qrSession = QRAuthManager.getAuthSession(sessionId);
@@ -233,9 +233,9 @@ io.on('connection', (socket) => {
         });
 
         if (updated) {
-          console.log('✅ QRAuthManager session updated to VERIFIED');
+          console.log(' QRAuthManager session updated to VERIFIED');
         } else {
-          console.error('❌ Failed to update QRAuthManager session');
+          console.error(' Failed to update QRAuthManager session');
         }
 
         // Emit success to desktop
@@ -250,7 +250,7 @@ io.on('connection', (socket) => {
 
       } else if (type === 'register') {
         // REGISTRATION: Just send face descriptor back
-        console.log('✅ Face captured for registration');
+        console.log(' Face captured for registration');
         io.to(sessionId).emit('face-verified', {
           sessionId,
           success: true,
@@ -260,7 +260,7 @@ io.on('connection', (socket) => {
       }
 
     } catch (error) {
-      console.error('❌ Face verification error:', error);
+      console.error(' Face verification error:', error);
       io.to(sessionId).emit('face-verification-complete', {
         sessionId,
         success: false,
@@ -270,14 +270,14 @@ io.on('connection', (socket) => {
   });
 
   socket.on('disconnect', () => {
-    console.log('🔌 Client disconnected:', socket.id);
+    console.log(' Client disconnected:', socket.id);
   });
 });
 
 /* ================================
-   ✅ SERVER START
+    SERVER START
 ================================ */
 const PORT = process.env.PORT || 5000;
 server.listen(PORT, () =>
-  console.log(`🚀 Server running on port ${PORT}`)
+  console.log(` Server running on port ${PORT}`)
 )

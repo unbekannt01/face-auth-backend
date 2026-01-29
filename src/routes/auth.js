@@ -172,7 +172,7 @@ router.post('/login/complete', async (req, res) => {
     const session = QRAuthManager.completeAuth(sessionId);
     
     if (!session) {
-      console.error('❌ Session not found or not verified:', sessionId);
+      console.error(' Session not found or not verified:', sessionId);
       
       // Debug: Check if session exists at all
       const checkSession = QRAuthManager.getAuthSession(sessionId);
@@ -191,7 +191,7 @@ router.post('/login/complete', async (req, res) => {
     // Get user
     const user = await User.findById(session.userId);
     if (!user) {
-      console.error('❌ User not found:', session.userId);
+      console.error(' User not found:', session.userId);
       return res.status(401).json({ 
         success: false, 
         message: 'User not found' 
