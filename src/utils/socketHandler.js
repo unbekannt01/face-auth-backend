@@ -93,13 +93,18 @@ function setupSocketHandlers(io) {
 
           //  CRITICAL FIX: Update QRAuthManager session status to 'verified'
           // This is what was missing! Without this, /api/auth/login/complete returns 401
-          QRAuthManager.updateAuthStatus(sessionId, 'verified', {
+          const updateSuccess = QRAuthManager.updateAuthStatus(sessionId, 'verified', {
             userId: user._id.toString(),
             email: user.email,
             verifiedAt: Date.now(),
             matchDistance: distance
           });
-          console.log(' QRAuthManager session updated to VERIFIED');
+          
+          if (updateSuccess) {
+            console.log(' QRAuthManager session updated to VERIFIED');
+          } else {
+            console.error(' Failed to update QRAuthManager session!');
+          }
 
           // Emit success to desktop
           io.to(sessionId).emit('face-verification-complete', {
@@ -107,6 +112,7 @@ function setupSocketHandlers(io) {
             success: true,
             faceDescriptor: faceDescriptor,
             email: email,
+            userId: user._id.toString(),
             message: 'Face verified successfully'
           });
 
