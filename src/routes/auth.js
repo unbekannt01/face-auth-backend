@@ -111,44 +111,58 @@ router.post('/register', async (req, res) => {
 });
 
 // @route   POST /api/auth/login/initiate
-// @desc    Initiate login - UPDATED to use QRAuthManager
+// @desc    Initiate login - UPDATED to validate email AND password
 // @access  Public
 router.post('/login/initiate', async (req, res) => {
   try {
-    const { email } = req.body;
+    const { email, password } = req.body;
     
-    if (!email) {
+    console.log('🔑 Login initiate request for:', email);
+    
+    // Validation
+    if (!email || !password) {
       return res.status(400).json({ 
         success: false, 
-        message: 'Email is required' 
+        message: 'Email and password are required' 
       });
     }
     
     // Check if user exists
-    const user = await User.findOne({ email });
+    const user = await User.findOne({ email: email.toLowerCase() });
     if (!user) {
+      console.log('❌ User not found:', email);
       return res.status(401).json({ 
         success: false, 
-        message: 'Invalid credentials' 
+        message: 'Invalid email or password' 
       });
     }
     
-    // Generate QR session using QRAuthManager
+    // Verify password IMMEDIATELY
+    const isPasswordValid = await user.comparePassword(password);
+    if (!isPasswordValid) {
+      console.log('❌ Invalid password for:', email);
+      return res.status(401).json({ 
+        success: false, 
+        message: 'Invalid email or password' 
+      });
+    }
+    
+    // Password is correct - generate QR session
     const sessionId = QRAuthManager.generateAuthSession(user._id, email);
     
-    console.log('🔑 Login initiated for:', email, 'Session:', sessionId);
+    console.log('✅ Login credentials verified! Session:', sessionId);
     
     res.json({
       success: true,
       sessionId,
-      message: 'Scan QR code with your mobile device'
+      message: 'Credentials verified! Scan QR code with mobile device'
     });
     
   } catch (error) {
     console.error('Login initiation error:', error);
     res.status(500).json({ 
       success: false, 
-      message: 'Server error' 
+      message: 'Server error during login' 
     });
   }
 });
@@ -324,22 +338,44 @@ router.put('/update-face', authMiddleware, async (req, res) => {
   try {
     const { faceDescriptor } = req.body;
     
+    console.log('📸 Face update request from user:', req.userId);
+    
     // Validation
-    if (!faceDescriptor || !Array.isArray(faceDescriptor) || faceDescriptor.length !== 128) {
+    if (!faceDescriptor) {
+      console.error('❌ No face descriptor provided');
       return res.status(400).json({
         success: false,
-        message: 'Invalid face descriptor'
+        message: 'Face descriptor is required'
+      });
+    }
+
+    if (!Array.isArray(faceDescriptor)) {
+      console.error('❌ Face descriptor is not an array');
+      return res.status(400).json({
+        success: false,
+        message: 'Face descriptor must be an array'
+      });
+    }
+
+    if (faceDescriptor.length !== 128) {
+      console.error('❌ Face descriptor length is', faceDescriptor.length, 'expected 128');
+      return res.status(400).json({
+        success: false,
+        message: `Invalid face descriptor length: ${faceDescriptor.length} (expected 128)`
       });
     }
 
     // Find user
     const user = await User.findById(req.userId);
     if (!user) {
+      console.error('❌ User not found:', req.userId);
       return res.status(404).json({
         success: false,
         message: 'User not found'
       });
     }
+
+    console.log('👤 User found:', user.email);
 
     // Update face data
     user.faceDescriptor = faceDescriptor;
@@ -355,20 +391,23 @@ router.put('/update-face', authMiddleware, async (req, res) => {
       user.faceDescriptors = user.faceDescriptors.slice(-3);
     }
 
-    await user.save();
+    const savedUser = await user.save();
 
     console.log('✅ Face data updated for user:', user.email);
+    console.log('✅ Total face descriptors stored:', savedUser.faceDescriptors.length);
 
     res.json({
       success: true,
-      message: 'Face data updated successfully'
+      message: 'Face data updated successfully',
+      descriptorCount: savedUser.faceDescriptors.length
     });
 
   } catch (error) {
-    console.error('Face update error:', error);
+    console.error('❌ Face update error:', error.message);
+    console.error(error.stack);
     res.status(500).json({
       success: false,
-      message: 'Server error during face update'
+      message: 'Server error during face update: ' + error.message
     });
   }
 });
@@ -380,6 +419,8 @@ router.put('/update-face', authMiddleware, async (req, res) => {
 router.put('/change-password', authMiddleware, async (req, res) => {
   try {
     const { currentPassword, newPassword } = req.body;
+    
+    console.log('🔑 Password change request from user:', req.userId);
     
     // Validation
     if (!currentPassword || !newPassword) {
@@ -399,24 +440,31 @@ router.put('/change-password', authMiddleware, async (req, res) => {
     // Find user
     const user = await User.findById(req.userId);
     if (!user) {
+      console.error('❌ User not found:', req.userId);
       return res.status(404).json({
         success: false,
         message: 'User not found'
       });
     }
 
+    console.log('👤 User found:', user.email);
+
     // Verify current password
     const isMatch = await user.comparePassword(currentPassword);
     if (!isMatch) {
+      console.error('❌ Current password is incorrect for:', user.email);
       return res.status(401).json({
         success: false,
         message: 'Current password is incorrect'
       });
     }
 
+    console.log('✅ Current password verified');
+
     // Check if new password is same as current
     const isSamePassword = await bcrypt.compare(newPassword, user.password);
     if (isSamePassword) {
+      console.error('❌ New password same as current for:', user.email);
       return res.status(400).json({
         success: false,
         message: 'New password must be different from current password'
@@ -425,9 +473,10 @@ router.put('/change-password', authMiddleware, async (req, res) => {
 
     // Update password (will be hashed by pre-save hook)
     user.password = newPassword;
-    await user.save();
+    const savedUser = await user.save();
 
-    console.log('✅ Password changed for user:', user.email);
+    console.log('✅ Password successfully changed for user:', user.email);
+    console.log('✅ Saved user:', savedUser._id);
 
     res.json({
       success: true,
@@ -435,10 +484,11 @@ router.put('/change-password', authMiddleware, async (req, res) => {
     });
 
   } catch (error) {
-    console.error('Password change error:', error);
+    console.error('❌ Password change error:', error.message);
+    console.error(error.stack);
     res.status(500).json({
       success: false,
-      message: 'Server error during password change'
+      message: 'Server error during password change: ' + error.message
     });
   }
 });
