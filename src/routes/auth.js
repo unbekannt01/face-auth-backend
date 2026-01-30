@@ -330,6 +330,88 @@ router.get('/verify', authMiddleware, async (req, res) => {
   }
 });
 
+// @route   POST /api/auth/update-face/initiate
+// @desc    Initiate face update - Generate QR for mobile
+// @access  Private
+router.post('/update-face/initiate', authMiddleware, async (req, res) => {
+  try {
+    console.log('📸 Face update initiate request from user:', req.userId);
+    
+    // Find user
+    const user = await User.findById(req.userId);
+    if (!user) {
+      console.error('❌ User not found:', req.userId);
+      return res.status(404).json({
+        success: false,
+        message: 'User not found'
+      });
+    }
+
+    console.log('👤 User found:', user.email);
+
+    // Generate QR session for face update
+    const sessionId = QRAuthManager.generateAuthSession(user._id, user.email, 'update-face');
+    
+    console.log('✅ Face update session created:', sessionId);
+    
+    res.json({
+      success: true,
+      sessionId,
+      message: 'Face update session created. Scan QR code with mobile device'
+    });
+    
+  } catch (error) {
+    console.error('❌ Face update initiation error:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: 'Server error during face update initiation' 
+    });
+  }
+});
+
+// @route   POST /api/auth/update-face/complete
+// @desc    Complete face update after mobile capture
+// @access  Public
+router.post('/update-face/complete', async (req, res) => {
+  try {
+    const { sessionId } = req.body;
+    
+    console.log('📸 Face update complete request for session:', sessionId);
+    
+    if (!sessionId) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Session ID required' 
+      });
+    }
+    
+    // Get session from QRAuthManager
+    const session = QRAuthManager.completeAuth(sessionId);
+    
+    if (!session) {
+      console.error('❌ Session not found or not verified:', sessionId);
+      return res.status(401).json({ 
+        success: false, 
+        message: 'Session not verified or expired. Please try again.' 
+      });
+    }
+    
+    console.log('✅ Face update session verified');
+    
+    res.json({
+      success: true,
+      message: 'Face update completed successfully'
+    });
+    
+  } catch (error) {
+    console.error('❌ Face update completion error:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: 'Server error' 
+    });
+  }
+});
+
 // 🔥 NEW ROUTE: Update Face Data
 // @route   PUT /api/auth/update-face
 // @desc    Update user's face descriptor

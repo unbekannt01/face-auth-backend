@@ -125,6 +125,59 @@ function setupSocketHandlers(io) {
             faceDescriptor: faceDescriptor,
             message: 'Face captured successfully'
           });
+
+        } else if (type === 'update-face') {
+          // FACE UPDATE: Update user's face descriptor
+          console.log(' Face captured for update');
+          
+          const user = await User.findOne({ email: email.toLowerCase() });
+          
+          if (!user) {
+            console.log(' User not found for update:', email);
+            io.to(sessionId).emit('face-verification-complete', {
+              sessionId,
+              success: false,
+              message: 'User not found'
+            });
+            return;
+          }
+
+          // Update face descriptor
+          user.faceDescriptor = faceDescriptor;
+          
+          if (!user.faceDescriptors) {
+            user.faceDescriptors = [];
+          }
+          user.faceDescriptors.push(faceDescriptor);
+          
+          // Keep only last 3 descriptors
+          if (user.faceDescriptors.length > 3) {
+            user.faceDescriptors = user.faceDescriptors.slice(-3);
+          }
+
+          await user.save();
+
+          console.log(' Face data updated for user:', email);
+          console.log(' Total descriptors stored:', user.faceDescriptors.length);
+
+          // Update session status
+          const updateSuccess = QRAuthManager.updateAuthStatus(sessionId, 'verified', {
+            userId: user._id.toString(),
+            email: user.email,
+            updatedAt: Date.now(),
+            type: 'update-face'
+          });
+          
+          if (updateSuccess) {
+            console.log(' QRAuthManager session updated to VERIFIED');
+          }
+
+          // Emit success to desktop
+          io.to(sessionId).emit('face-verification-complete', {
+            sessionId,
+            success: true,
+            message: 'Face updated successfully'
+          });
         }
 
       } catch (error) {
