@@ -1,9 +1,10 @@
 // backend/src/routes/auth.js
-// UPDATED: Auth routes with proper QRAuthManager integration
+// UPDATED: Added face update and password change routes
 
 const express = require('express');
 const router = express.Router();
 const jwt = require('jsonwebtoken');
+const bcrypt = require('bcryptjs');
 const User = require('../models/User');
 const QRAuthManager = require('../utils/qrAuth');
 const authMiddleware = require('../middleware/auth');
@@ -135,7 +136,7 @@ router.post('/login/initiate', async (req, res) => {
     // Generate QR session using QRAuthManager
     const sessionId = QRAuthManager.generateAuthSession(user._id, email);
     
-    console.log(' Login initiated for:', email, 'Session:', sessionId);
+    console.log('🔑 Login initiated for:', email, 'Session:', sessionId);
     
     res.json({
       success: true,
@@ -168,11 +169,11 @@ router.post('/login/complete', async (req, res) => {
       });
     }
     
-    //  Get session from QRAuthManager
+    // Get session from QRAuthManager
     const session = QRAuthManager.completeAuth(sessionId);
     
     if (!session) {
-      console.error(' Session not found or not verified:', sessionId);
+      console.error('❌ Session not found or not verified:', sessionId);
       
       // Debug: Check if session exists at all
       const checkSession = QRAuthManager.getAuthSession(sessionId);
@@ -186,12 +187,12 @@ router.post('/login/complete', async (req, res) => {
       });
     }
     
-    console.log(' Session found:', session);
+    console.log('✅ Session found:', session);
     
     // Get user
     const user = await User.findById(session.userId);
     if (!user) {
-      console.error(' User not found:', session.userId);
+      console.error('❌ User not found:', session.userId);
       return res.status(401).json({ 
         success: false, 
         message: 'User not found' 
@@ -205,7 +206,7 @@ router.post('/login/complete', async (req, res) => {
     // Generate token
     const token = generateToken(user._id);
     
-    console.log(' Login successful for:', user.email);
+    console.log('✅ Login successful for:', user.email);
     
     res.json({
       success: true,
@@ -287,7 +288,9 @@ router.get('/me', authMiddleware, async (req, res) => {
   }
 });
 
-// Verify Token Route
+// @route   GET /api/auth/verify
+// @desc    Verify Token
+// @access  Private
 router.get('/verify', authMiddleware, async (req, res) => {
   try {
     const user = await User.findById(req.userId).select('-password -faceDescriptor');
@@ -309,6 +312,133 @@ router.get('/verify', authMiddleware, async (req, res) => {
     res.status(500).json({ 
       success: false, 
       message: 'Server error' 
+    });
+  }
+});
+
+// 🔥 NEW ROUTE: Update Face Data
+// @route   PUT /api/auth/update-face
+// @desc    Update user's face descriptor
+// @access  Private
+router.put('/update-face', authMiddleware, async (req, res) => {
+  try {
+    const { faceDescriptor } = req.body;
+    
+    // Validation
+    if (!faceDescriptor || !Array.isArray(faceDescriptor) || faceDescriptor.length !== 128) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid face descriptor'
+      });
+    }
+
+    // Find user
+    const user = await User.findById(req.userId);
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: 'User not found'
+      });
+    }
+
+    // Update face data
+    user.faceDescriptor = faceDescriptor;
+    
+    // Add to faceDescriptors array for better matching
+    if (!user.faceDescriptors) {
+      user.faceDescriptors = [];
+    }
+    user.faceDescriptors.push(faceDescriptor);
+    
+    // Keep only last 3 descriptors to avoid bloat
+    if (user.faceDescriptors.length > 3) {
+      user.faceDescriptors = user.faceDescriptors.slice(-3);
+    }
+
+    await user.save();
+
+    console.log('✅ Face data updated for user:', user.email);
+
+    res.json({
+      success: true,
+      message: 'Face data updated successfully'
+    });
+
+  } catch (error) {
+    console.error('Face update error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error during face update'
+    });
+  }
+});
+
+// 🔥 NEW ROUTE: Change Password
+// @route   PUT /api/auth/change-password
+// @desc    Change user's password
+// @access  Private
+router.put('/change-password', authMiddleware, async (req, res) => {
+  try {
+    const { currentPassword, newPassword } = req.body;
+    
+    // Validation
+    if (!currentPassword || !newPassword) {
+      return res.status(400).json({
+        success: false,
+        message: 'Please provide current and new password'
+      });
+    }
+
+    if (newPassword.length < 8) {
+      return res.status(400).json({
+        success: false,
+        message: 'New password must be at least 8 characters long'
+      });
+    }
+
+    // Find user
+    const user = await User.findById(req.userId);
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: 'User not found'
+      });
+    }
+
+    // Verify current password
+    const isMatch = await user.comparePassword(currentPassword);
+    if (!isMatch) {
+      return res.status(401).json({
+        success: false,
+        message: 'Current password is incorrect'
+      });
+    }
+
+    // Check if new password is same as current
+    const isSamePassword = await bcrypt.compare(newPassword, user.password);
+    if (isSamePassword) {
+      return res.status(400).json({
+        success: false,
+        message: 'New password must be different from current password'
+      });
+    }
+
+    // Update password (will be hashed by pre-save hook)
+    user.password = newPassword;
+    await user.save();
+
+    console.log('✅ Password changed for user:', user.email);
+
+    res.json({
+      success: true,
+      message: 'Password changed successfully'
+    });
+
+  } catch (error) {
+    console.error('Password change error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error during password change'
     });
   }
 });
