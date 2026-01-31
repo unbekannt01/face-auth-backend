@@ -1,6 +1,4 @@
 // backend/server.js
-// COMPLETE WORKING VERSION with QRAuthManager integration
-
 const express = require("express");
 const mongoose = require("mongoose");
 const cors = require("cors");
@@ -112,14 +110,52 @@ app.post("/api/session/create", (req, res) => {
   res.json({ success: true, sessionId });
 });
 
+// Create update-face session
+app.post("/api/session/update-face/:sessionId", (req, res) => {
+  const { sessionId } = req.params;
+  const token = req.headers.authorization?.split(' ')[1];
+
+  if (!sessionId) {
+    return res.status(400).json({
+      success: false,
+      message: "Session ID required",
+    });
+  }
+
+  // Decode token to get user email
+  try {
+    const jwt = require('jsonwebtoken');
+    const decoded = jwt.verify(token, process.env.JWT_SECRET || 'your-secret-key');
+    
+    // Store session data for mobile to retrieve
+    sessions.set(sessionId, {
+      email: decoded.email,
+      userId: decoded.userId,
+      type: 'update-face',
+      timestamp: Date.now(),
+    });
+
+    console.log(` Update-face session created: ${sessionId}`);
+    res.json({ success: true, sessionId });
+  } catch (err) {
+    console.error(' Token verification failed:', err);
+    res.status(401).json({
+      success: false,
+      message: "Invalid token",
+    });
+  }
+});
+
 // Get session
 app.get("/api/session/:sessionId", (req, res) => {
   const { sessionId } = req.params;
   const session = sessions.get(sessionId);
 
   if (session) {
+    console.log(`📋 Session retrieved: ${sessionId}`);
     res.json({ success: true, data: session });
   } else {
+    console.log(`❌ Session not found: ${sessionId}`);
     res.status(404).json({
       success: false,
       message: "Session not found or expired",
@@ -256,6 +292,59 @@ io.on('connection', (socket) => {
           success: true,
           faceDescriptor: faceDescriptor,
           message: 'Face captured successfully'
+        });
+
+      } else if (type === 'update-face') {
+        // UPDATE FACE: Update user's face descriptor
+        console.log(' Face captured for update');
+        
+        const user = await User.findOne({ email: email.toLowerCase() });
+        
+        if (!user) {
+          console.log(' User not found for update:', email);
+          io.to(sessionId).emit('face-verification-complete', {
+            sessionId,
+            success: false,
+            message: 'User not found'
+          });
+          return;
+        }
+
+        // Update face descriptor
+        user.faceDescriptor = faceDescriptor;
+        
+        if (!user.faceDescriptors) {
+          user.faceDescriptors = [];
+        }
+        user.faceDescriptors.push(faceDescriptor);
+        
+        // Keep only last 3 descriptors
+        if (user.faceDescriptors.length > 3) {
+          user.faceDescriptors = user.faceDescriptors.slice(-3);
+        }
+
+        await user.save();
+
+        console.log(' Face data updated for user:', email);
+        console.log(' Total descriptors stored:', user.faceDescriptors.length);
+
+        // Update QRAuthManager session
+        const updateSuccess = QRAuthManager.updateAuthStatus(sessionId, 'verified', {
+          userId: user._id.toString(),
+          email: user.email,
+          updatedAt: Date.now(),
+          type: 'update-face'
+        });
+        
+        if (updateSuccess) {
+          console.log(' QRAuthManager session updated to VERIFIED');
+        }
+
+        // Emit success to both mobile and desktop
+        io.to(sessionId).emit('face-verification-complete', {
+          sessionId,
+          success: true,
+          message: 'Face updated successfully'
         });
       }
 
