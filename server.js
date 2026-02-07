@@ -432,12 +432,18 @@ server.listen(PORT, () => {
   }
 });
 
-// Graceful shutdown
-process.on("SIGTERM", () => {
-  console.log("SIGTERM received, shutting down gracefully");
-  server.close(() => {
-    mongoose.connection.close(false, () => {
+process.on("SIGINT", async () => {
+  console.log("SIGINT received, shutting down gracefully");
+
+  server.close(async () => {
+    try {
+      await mongoose.connection.close();
+      console.log("MongoDB connection closed successfully");
+    } catch (err) {
+      console.error("Error closing MongoDB connection:", err);
+    } finally {
       process.exit(0);
-    });
+    }
   });
 });
+
