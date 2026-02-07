@@ -13,7 +13,7 @@ const authMiddleware = require("../middleware/auth");
 // Import security middleware
 const {
   validateSignature,
-  rateLimiters,
+  // rateLimiters,
   encryptFaceDescriptor,
   decryptFaceDescriptor,
   trackSuspiciousActivity,
@@ -84,7 +84,7 @@ const passwordChangeValidation = [
 ================================ */
 
 // @route   POST /api/auth/session/create
-router.post("/session/create", rateLimiters.auth, (req, res) => {
+router.post("/session/create", (req, res) => {
   try {
     const { sessionId, email, password, type } = req.body;
 
@@ -123,7 +123,7 @@ router.post("/session/create", rateLimiters.auth, (req, res) => {
 });
 
 // @route   GET /api/auth/session/:sessionId
-router.get("/session/:sessionId", rateLimiters.auth, (req, res) => {
+router.get("/session/:sessionId", (req, res) => {
   try {
     const { sessionId } = req.params;
 
@@ -170,7 +170,6 @@ router.get("/session/:sessionId", rateLimiters.auth, (req, res) => {
 // @route   POST /api/auth/register
 router.post(
   "/register",
-  rateLimiters.auth,
   registerValidation,
   async (req, res) => {
     try {
@@ -255,7 +254,6 @@ router.post(
 // @route   POST /api/auth/login/initiate
 router.post(
   "/login/initiate",
-  rateLimiters.auth,
   loginValidation,
   async (req, res) => {
     try {
@@ -313,7 +311,7 @@ router.post(
 );
 
 // @route   POST /api/auth/login/complete
-router.post("/login/complete", rateLimiters.auth, async (req, res) => {
+router.post("/login/complete", async (req, res) => {
   try {
     const { sessionId } = req.body;
 
