@@ -1,12 +1,22 @@
 // backend/server.js
-// UPDATED: Integrated session management into auth routes
 
 const express = require("express");
 const mongoose = require("mongoose");
 const cors = require("cors");
 const http = require("http");
 const { Server } = require("socket.io");
+const helmet = require("helmet");
 require("dotenv").config();
+
+// Import security middleware
+const {
+  getSecurityHeaders,
+  sanitizeInput,
+  checkIPReputation,
+  rateLimiters,
+  trackSuspiciousActivity,
+  decryptFaceDescriptor,
+} = require("./src/middleware/security");
 
 const authRoutes = require("./src/routes/auth");
 const User = require("./src/models/User");
@@ -14,6 +24,30 @@ const QRAuthManager = require("./src/utils/qrAuth");
 
 const app = express();
 const server = http.createServer(app);
+
+/* ================================
+    SECURITY HEADERS (FIRST!)
+================================ */
+app.use(
+  helmet({
+    contentSecurityPolicy: {
+      directives: {
+        defaultSrc: ["'self'"],
+        styleSrc: ["'self'", "'unsafe-inline'"],
+        scriptSrc: ["'self'"],
+        imgSrc: ["'self'", "data:", "https:"],
+      },
+    },
+    hsts: {
+      maxAge: 31536000,
+      includeSubDomains: true,
+      preload: true,
+    },
+  }),
+);
+
+app.use(getSecurityHeaders);
+app.use(checkIPReputation);
 
 /* ================================
     ALLOWED ORIGINS (LOCAL + PROD)
@@ -24,15 +58,24 @@ const allowedOrigins = [
   "https://face-auth01.vercel.app",
 ];
 
+// Add production URLs from env
+if (process.env.FRONTEND_URL) {
+  allowedOrigins.push(process.env.FRONTEND_URL);
+}
+
 /* ================================
     EXPRESS CORS (REST APIs)
 ================================ */
 app.use(
   cors({
     origin: function (origin, callback) {
-      if (!origin || allowedOrigins.includes(origin)) {
+      // Allow requests with no origin (mobile apps, Postman, etc.)
+      if (!origin) return callback(null, true);
+
+      if (allowedOrigins.includes(origin)) {
         callback(null, true);
       } else {
+        console.error(`❌ CORS blocked: ${origin}`);
         callback(new Error("Not allowed by CORS"));
       }
     },
@@ -41,8 +84,18 @@ app.use(
   }),
 );
 
+/* ================================
+    BODY PARSERS + SANITIZATION
+================================ */
 app.use(express.json({ limit: "50mb" }));
 app.use(express.urlencoded({ limit: "50mb", extended: true }));
+app.use(sanitizeInput); // Sanitize all inputs
+
+/* ================================
+    RATE LIMITING (IMPORTANT!)
+================================ */
+// Apply general rate limiting to all API routes
+app.use("/api/", rateLimiters.api);
 
 /* ================================
     SOCKET.IO WITH CORS
@@ -60,28 +113,48 @@ const io = new Server(server, {
 ================================ */
 mongoose
   .connect(process.env.MONGODB_URI)
-  .then(() => console.log("✅ MongoDB Connected"))
-  .catch((err) => console.error("❌ MongoDB Error:", err));
+  .then(() => {
+    if (process.env.NODE_ENV === "production") {
+      // Don't log in production
+    } else {
+      console.log("✅ MongoDB Connected");
+    }
+  })
+  .catch((err) => {
+    console.error("❌ MongoDB Error:", err);
+    process.exit(1); // Exit if DB connection fails
+  });
 
 /* ================================
     ROUTES
 ================================ */
 app.use("/api/auth", authRoutes);
 
-// Health check
+// Health check (no sensitive info)
 app.get("/", (req, res) => {
-  res.json({ message: "✅ Face Auth Backend Running!" });
+  res.json({
+    status: "online",
+    timestamp: Date.now(),
+  });
+});
+
+// Health check for monitoring
+app.get("/api/health", (req, res) => {
+  res.json({
+    status: "healthy",
+    uptime: process.uptime(),
+    timestamp: Date.now(),
+  });
 });
 
 // Backward compatibility: redirect /api/session/* to /api/auth/session/*
 app.use("/api/session", (req, res) => {
   const newUrl = `/api/auth/session${req.url}`;
-  console.log(`🔄 Redirecting: ${req.url} -> ${newUrl}`);
   res.redirect(307, newUrl); // 307 preserves POST/GET method
 });
 
 /* ================================
-    SOCKET.IO HANDLERS
+    SOCKET.IO HANDLERS (SECURED)
 ================================ */
 
 // Helper function
@@ -98,12 +171,19 @@ function euclideanDistance(desc1, desc2) {
 }
 
 io.on("connection", (socket) => {
-  console.log("🔌 Client connected:", socket.id);
+  const clientIP = socket.handshake.address;
+
+  if (process.env.NODE_ENV !== "production") {
+    console.log("🔌 Client connected:", socket.id);
+  }
 
   // QR Code generated - desktop sends this
   socket.on("qr-generated", (data) => {
     const { sessionId, type, email } = data;
-    console.log("📱 QR generated for session:", sessionId, "Type:", type);
+
+    if (process.env.NODE_ENV !== "production") {
+      console.log("📱 QR generated for session:", sessionId, "Type:", type);
+    }
 
     // Join room for this session
     socket.join(sessionId);
@@ -113,66 +193,94 @@ io.on("connection", (socket) => {
   socket.on("face-captured", async (data) => {
     const { sessionId, faceDescriptor, email, password, type } = data;
 
-    console.log("📸 Face captured for session:", sessionId);
-    console.log("Type:", type, "Email:", email);
+    if (process.env.NODE_ENV !== "production") {
+      console.log("📸 Face captured for session:", sessionId);
+      console.log("Type:", type, "Email:", email);
+    }
 
     try {
+      // Decrypt face descriptor if encrypted
+      let decryptedDescriptor = faceDescriptor;
+      if (typeof faceDescriptor === "string" && faceDescriptor.includes(":")) {
+        decryptedDescriptor = decryptFaceDescriptor(faceDescriptor);
+        if (!decryptedDescriptor) {
+          io.to(sessionId).emit("face-verification-complete", {
+            sessionId,
+            success: false,
+            message: "Invalid encrypted data",
+          });
+          return;
+        }
+      }
+
       if (type === "login") {
         // LOGIN: Verify face matches registered user
         const user = await User.findOne({ email: email.toLowerCase() });
 
         if (!user) {
-          console.log("❌ User not found:", email);
+          if (process.env.NODE_ENV !== "production") {
+            console.log("❌ User not found:", email);
+          }
+
+          trackSuspiciousActivity(clientIP, "User not found attempt");
+
           io.to(sessionId).emit("face-verification-complete", {
             sessionId,
             success: false,
-            message: "User not found",
+            message: "Authentication failed",
           });
           return;
         }
 
         if (!user.faceDescriptor || user.faceDescriptor.length === 0) {
-          console.log("❌ No face data for user:", email);
           io.to(sessionId).emit("face-verification-complete", {
             sessionId,
             success: false,
-            message: "No face data registered",
+            message: "No biometric data registered",
           });
           return;
         }
 
         // Compare faces
-        const distance = euclideanDistance(user.faceDescriptor, faceDescriptor);
+        const distance = euclideanDistance(
+          user.faceDescriptor,
+          decryptedDescriptor,
+        );
         const threshold = 0.6;
 
-        console.log(
-          "🔍 Face comparison - Distance:",
-          distance,
-          "Threshold:",
-          threshold,
-        );
+        if (process.env.NODE_ENV !== "production") {
+          console.log(
+            "🔍 Face comparison - Distance:",
+            distance,
+            "Threshold:",
+            threshold,
+          );
+        }
 
         if (distance > threshold) {
-          console.log("❌ Face does not match!");
+          if (process.env.NODE_ENV !== "production") {
+            console.log("❌ Face does not match!");
+          }
+
+          trackSuspiciousActivity(clientIP, "Failed face verification");
+
           io.to(sessionId).emit("face-verification-complete", {
             sessionId,
             success: false,
-            message: "Face does not match registered face. Please try again.",
+            message: "Biometric verification failed",
           });
           return;
         }
 
         // ✅ FACE MATCHED!
-        console.log("✅ Face matched! Login approved");
+        if (process.env.NODE_ENV !== "production") {
+          console.log("✅ Face matched! Login approved");
+        }
 
         // Get or create QR session
         let qrSession = QRAuthManager.getAuthSession(sessionId);
 
         if (!qrSession) {
-          console.log(
-            "📋 QR session not found, creating temporary session:",
-            sessionId,
-          );
           const tempSession = {
             sessionId,
             userId: user._id.toString(),
@@ -186,46 +294,43 @@ io.on("connection", (socket) => {
         }
 
         // Update to verified
-        const updated = QRAuthManager.updateAuthStatus(sessionId, "verified", {
+        QRAuthManager.updateAuthStatus(sessionId, "verified", {
           userId: user._id.toString(),
           email: user.email,
           verifiedAt: Date.now(),
           matchDistance: distance,
         });
 
-        if (updated) {
-          console.log("✅ QRAuthManager session updated to VERIFIED");
-        } else {
-          console.error("❌ Failed to update QRAuthManager session");
-        }
-
         // Emit success to desktop
         io.to(sessionId).emit("face-verification-complete", {
           sessionId,
           success: true,
-          faceDescriptor: faceDescriptor,
+          faceDescriptor: decryptedDescriptor,
           email: email,
           userId: user._id.toString(),
-          message: "Face verified successfully",
+          message: "Biometric verification successful",
         });
       } else if (type === "register") {
         // REGISTRATION: Just send face descriptor back
-        console.log("📝 Face captured for registration");
+        if (process.env.NODE_ENV !== "production") {
+          console.log("📝 Face captured for registration");
+        }
+
         io.to(sessionId).emit("face-verified", {
           sessionId,
           success: true,
-          faceDescriptor: faceDescriptor,
-          message: "Face captured successfully",
+          faceDescriptor: decryptedDescriptor,
+          message: "Biometric data captured",
         });
       } else if (type === "update-face") {
         // UPDATE FACE: Update user's face descriptor
-        console.log("🔄 Face captured for update");
+        if (process.env.NODE_ENV !== "production") {
+          console.log("🔄 Face captured for update");
+        }
 
-        // Get session to find userId
         const session = QRAuthManager.getAuthSession(sessionId);
 
         if (!session || !session.userId) {
-          console.log("❌ Invalid session for face update:", sessionId);
           io.to(sessionId).emit("face-verification-complete", {
             sessionId,
             success: false,
@@ -237,7 +342,6 @@ io.on("connection", (socket) => {
         const user = await User.findById(session.userId);
 
         if (!user) {
-          console.log("❌ User not found for update:", session.userId);
           io.to(sessionId).emit("face-verification-complete", {
             sessionId,
             success: false,
@@ -247,12 +351,12 @@ io.on("connection", (socket) => {
         }
 
         // Update face descriptor
-        user.faceDescriptor = faceDescriptor;
+        user.faceDescriptor = decryptedDescriptor;
 
         if (!user.faceDescriptors) {
           user.faceDescriptors = [];
         }
-        user.faceDescriptors.push(faceDescriptor);
+        user.faceDescriptors.push(decryptedDescriptor);
 
         // Keep only last 3 descriptors
         if (user.faceDescriptors.length > 3) {
@@ -261,11 +365,9 @@ io.on("connection", (socket) => {
 
         await user.save();
 
-        console.log("✅ Face data updated for user:", user.email);
-        console.log(
-          "📊 Total descriptors stored:",
-          user.faceDescriptors.length,
-        );
+        if (process.env.NODE_ENV !== "production") {
+          console.log("✅ Face data updated for user:", user.email);
+        }
 
         // Update QRAuthManager session to verified
         QRAuthManager.updateAuthStatus(sessionId, "verified", {
@@ -275,27 +377,43 @@ io.on("connection", (socket) => {
           type: "update-face",
         });
 
-        console.log("✅ QRAuthManager session updated to VERIFIED");
-
-        // Emit success to both mobile and desktop
+        // Emit success
         io.to(sessionId).emit("face-verification-complete", {
           sessionId,
           success: true,
-          message: "Face updated successfully",
+          message: "Biometric data updated",
         });
       }
     } catch (error) {
-      console.error("❌ Face verification error:", error);
+      console.error("❌ Face verification error:", error.message);
+
       io.to(sessionId).emit("face-verification-complete", {
         sessionId,
         success: false,
-        message: "Verification failed. Please try again.",
+        message: "Verification failed",
       });
     }
   });
 
   socket.on("disconnect", () => {
-    console.log("🔌 Client disconnected:", socket.id);
+    if (process.env.NODE_ENV !== "production") {
+      console.log("🔌 Client disconnected:", socket.id);
+    }
+  });
+});
+
+/* ================================
+    ERROR HANDLING
+================================ */
+app.use((err, req, res, next) => {
+  console.error("Error:", err.message);
+
+  res.status(err.status || 500).json({
+    success: false,
+    message:
+      process.env.NODE_ENV === "production"
+        ? "Internal server error"
+        : err.message,
   });
 });
 
@@ -303,4 +421,23 @@ io.on("connection", (socket) => {
     SERVER START
 ================================ */
 const PORT = process.env.PORT || 5000;
-server.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
+server.listen(PORT, () => {
+  if (process.env.NODE_ENV === "production") {
+    // Don't log in production
+  } else {
+    console.log(`🚀 Server running on port ${PORT}`);
+    console.log(
+      `🔒 Security: ${process.env.NODE_ENV === "production" ? "ENABLED" : "DEV MODE"}`,
+    );
+  }
+});
+
+// Graceful shutdown
+process.on("SIGTERM", () => {
+  console.log("SIGTERM received, shutting down gracefully");
+  server.close(() => {
+    mongoose.connection.close(false, () => {
+      process.exit(0);
+    });
+  });
+});

@@ -1,15 +1,25 @@
 // backend/src/routes/auth.js
-// UPDATED: Added face update and password change routes + SESSION MANAGEMENT
 
 const express = require("express");
 const router = express.Router();
 const jwt = require("jsonwebtoken");
 const bcrypt = require("bcryptjs");
+const { body, validationResult } = require("express-validator");
+
 const User = require("../models/User");
 const QRAuthManager = require("../utils/qrAuth");
 const authMiddleware = require("../middleware/auth");
 
-// Helper: Calculate Euclidean distance between two face descriptors
+// Import security middleware
+const {
+  validateSignature,
+  rateLimiters,
+  encryptFaceDescriptor,
+  decryptFaceDescriptor,
+  trackSuspiciousActivity,
+} = require("../middleware/security");
+
+// Helper: Calculate Euclidean distance
 function euclideanDistance(desc1, desc2) {
   if (desc1.length !== desc2.length) return Infinity;
 
@@ -18,7 +28,7 @@ function euclideanDistance(desc1, desc2) {
   );
 }
 
-// Helper: Find best match among stored descriptors
+// Helper: Find best match
 function findBestMatch(inputDescriptor, storedDescriptors, threshold = 0.6) {
   let minDistance = Infinity;
 
@@ -43,13 +53,38 @@ function generateToken(userId) {
 }
 
 /* ================================
+   VALIDATION RULES
+================================ */
+const registerValidation = [
+  body("email").isEmail().normalizeEmail().withMessage("Invalid email format"),
+  body("password")
+    .isLength({ min: 6 })
+    .withMessage("Password must be at least 6 characters"),
+  body("name")
+    .trim()
+    .isLength({ min: 2 })
+    .withMessage("Name must be at least 2 characters"),
+  body("faceDescriptor").isArray().withMessage("Invalid biometric data"),
+];
+
+const loginValidation = [
+  body("email").isEmail().normalizeEmail().withMessage("Invalid email format"),
+  body("password").notEmpty().withMessage("Password required"),
+];
+
+const passwordChangeValidation = [
+  body("currentPassword").notEmpty().withMessage("Current password required"),
+  body("newPassword")
+    .isLength({ min: 8 })
+    .withMessage("New password must be at least 8 characters"),
+];
+
+/* ================================
    SESSION MANAGEMENT ROUTES
 ================================ */
 
 // @route   POST /api/auth/session/create
-// @desc    Create session for QR code flow
-// @access  Public
-router.post("/session/create", (req, res) => {
+router.post("/session/create", rateLimiters.auth, (req, res) => {
   try {
     const { sessionId, email, password, type } = req.body;
 
@@ -60,12 +95,10 @@ router.post("/session/create", (req, res) => {
       });
     }
 
-    console.log(`📋 Creating session: ${sessionId} (type: ${type})`);
-
     // Store session data in QRAuthManager
     const sessionData = {
       sessionId,
-      email,
+      email: email.toLowerCase(),
       password,
       type,
       status: "pending",
@@ -75,15 +108,13 @@ router.post("/session/create", (req, res) => {
 
     QRAuthManager.storeSessionData(sessionId, sessionData);
 
-    console.log(`✅ Session created: ${sessionId}`);
-
     res.json({
       success: true,
       sessionId,
       message: "Session created successfully",
     });
   } catch (error) {
-    console.error("❌ Session creation error:", error);
+    console.error("Session creation error:", error);
     res.status(500).json({
       success: false,
       message: "Server error during session creation",
@@ -92,25 +123,18 @@ router.post("/session/create", (req, res) => {
 });
 
 // @route   GET /api/auth/session/:sessionId
-// @desc    Get session data (used by mobile)
-// @access  Public
-router.get("/session/:sessionId", (req, res) => {
+router.get("/session/:sessionId", rateLimiters.auth, (req, res) => {
   try {
     const { sessionId } = req.params;
-
-    console.log(`📋 Fetching session: ${sessionId}`);
 
     const session = QRAuthManager.getAuthSession(sessionId);
 
     if (!session) {
-      console.error(`❌ Session not found: ${sessionId}`);
       return res.status(404).json({
         success: false,
         message: "Session not found or expired",
       });
     }
-
-    console.log(`✅ Session found: ${sessionId} (type: ${session.type})`);
 
     // Return session data
     const responseData = {
@@ -131,7 +155,7 @@ router.get("/session/:sessionId", (req, res) => {
       data: responseData,
     });
   } catch (error) {
-    console.error("❌ Session fetch error:", error);
+    console.error("Session fetch error:", error);
     res.status(500).json({
       success: false,
       message: "Server error during session fetch",
@@ -144,138 +168,154 @@ router.get("/session/:sessionId", (req, res) => {
 ================================ */
 
 // @route   POST /api/auth/register
-// @desc    Register user with face data
-// @access  Public
-router.post("/register", async (req, res) => {
-  try {
-    const { email, password, name, faceDescriptor } = req.body;
+router.post(
+  "/register",
+  rateLimiters.auth,
+  registerValidation,
+  async (req, res) => {
+    try {
+      // Check validation errors
+      const errors = validationResult(req);
+      if (!errors.isEmpty()) {
+        return res.status(400).json({
+          success: false,
+          message: errors.array()[0].msg,
+        });
+      }
 
-    // Validation
-    if (!email || !password || !name || !faceDescriptor) {
-      return res.status(400).json({
+      const { email, password, name, faceDescriptor } = req.body;
+
+      // Check if user exists
+      const existingUser = await User.findOne({ email: email.toLowerCase() });
+      if (existingUser) {
+        trackSuspiciousActivity(req.ip, "Duplicate registration");
+        return res.status(400).json({
+          success: false,
+          message: "User already exists",
+        });
+      }
+
+      // Decrypt face descriptor if encrypted
+      let decryptedDescriptor = faceDescriptor;
+      if (typeof faceDescriptor === "string" && faceDescriptor.includes(":")) {
+        decryptedDescriptor = decryptFaceDescriptor(faceDescriptor);
+        if (!decryptedDescriptor) {
+          return res.status(400).json({
+            success: false,
+            message: "Invalid biometric data",
+          });
+        }
+      }
+
+      // Validate face descriptor
+      if (
+        !Array.isArray(decryptedDescriptor) ||
+        decryptedDescriptor.length !== 128
+      ) {
+        return res.status(400).json({
+          success: false,
+          message: "Invalid biometric data format",
+        });
+      }
+
+      // Create user
+      const user = new User({
+        email: email.toLowerCase(),
+        password,
+        name,
+        faceDescriptor: decryptedDescriptor,
+        faceDescriptors: [decryptedDescriptor],
+      });
+
+      await user.save();
+
+      // Generate token
+      const token = generateToken(user._id);
+
+      res.status(201).json({
+        success: true,
+        message: "Registration successful",
+        token,
+        user: {
+          id: user._id,
+          email: user.email,
+          name: user.name,
+        },
+      });
+    } catch (error) {
+      console.error("Registration error:", error);
+      res.status(500).json({
         success: false,
-        message: "Please provide all required fields",
+        message: "Server error during registration",
       });
     }
-
-    // Check if user exists
-    const existingUser = await User.findOne({ email });
-    if (existingUser) {
-      return res.status(400).json({
-        success: false,
-        message: "User already exists",
-      });
-    }
-
-    // Validate face descriptor (should be array of 128 numbers)
-    if (!Array.isArray(faceDescriptor) || faceDescriptor.length !== 128) {
-      return res.status(400).json({
-        success: false,
-        message: "Invalid face descriptor",
-      });
-    }
-
-    // Create user
-    const user = new User({
-      email,
-      password,
-      name,
-      faceDescriptor,
-      faceDescriptors: [faceDescriptor], // Store multiple for better matching
-    });
-
-    await user.save();
-
-    // Generate token
-    const token = generateToken(user._id);
-
-    res.status(201).json({
-      success: true,
-      message: "User registered successfully",
-      token,
-      user: {
-        id: user._id,
-        email: user.email,
-        name: user.name,
-      },
-    });
-  } catch (error) {
-    console.error("Registration error:", error);
-    res.status(500).json({
-      success: false,
-      message: "Server error during registration",
-    });
-  }
-});
+  },
+);
 
 // @route   POST /api/auth/login/initiate
-// @desc    Initiate login - Validate email & password
-// @access  Public
-router.post("/login/initiate", async (req, res) => {
-  try {
-    const { email, password } = req.body;
+router.post(
+  "/login/initiate",
+  rateLimiters.auth,
+  loginValidation,
+  async (req, res) => {
+    try {
+      // Check validation errors
+      const errors = validationResult(req);
+      if (!errors.isEmpty()) {
+        return res.status(400).json({
+          success: false,
+          message: errors.array()[0].msg,
+        });
+      }
 
-    console.log("🔑 Login initiate request for:", email);
+      const { email, password } = req.body;
 
-    // Validation
-    if (!email || !password) {
-      return res.status(400).json({
+      // Check if user exists
+      const user = await User.findOne({ email: email.toLowerCase() });
+      if (!user) {
+        trackSuspiciousActivity(req.ip, "Login - user not found");
+        return res.status(401).json({
+          success: false,
+          message: "Invalid credentials",
+        });
+      }
+
+      // Verify password IMMEDIATELY
+      const isPasswordValid = await user.comparePassword(password);
+      if (!isPasswordValid) {
+        trackSuspiciousActivity(req.ip, "Login - invalid password");
+        return res.status(401).json({
+          success: false,
+          message: "Invalid credentials",
+        });
+      }
+
+      // Password is correct - generate QR session
+      const sessionId = QRAuthManager.generateAuthSession(
+        user._id,
+        email.toLowerCase(),
+        "login",
+      );
+
+      res.json({
+        success: true,
+        sessionId,
+        message: "Credentials verified. Scan QR code",
+      });
+    } catch (error) {
+      console.error("Login initiation error:", error);
+      res.status(500).json({
         success: false,
-        message: "Email and password are required",
+        message: "Server error during login",
       });
     }
-
-    // Check if user exists
-    const user = await User.findOne({ email: email.toLowerCase() });
-    if (!user) {
-      console.log("❌ User not found:", email);
-      return res.status(401).json({
-        success: false,
-        message: "Invalid email or password",
-      });
-    }
-
-    // Verify password IMMEDIATELY
-    const isPasswordValid = await user.comparePassword(password);
-    if (!isPasswordValid) {
-      console.log("❌ Invalid password for:", email);
-      return res.status(401).json({
-        success: false,
-        message: "Invalid email or password",
-      });
-    }
-
-    // Password is correct - generate QR session
-    const sessionId = QRAuthManager.generateAuthSession(
-      user._id,
-      email,
-      "login",
-    );
-
-    console.log("✅ Login credentials verified! Session:", sessionId);
-
-    res.json({
-      success: true,
-      sessionId,
-      message: "Credentials verified! Scan QR code with mobile device",
-    });
-  } catch (error) {
-    console.error("Login initiation error:", error);
-    res.status(500).json({
-      success: false,
-      message: "Server error during login",
-    });
-  }
-});
+  },
+);
 
 // @route   POST /api/auth/login/complete
-// @desc    Complete login after face verification
-// @access  Public
-router.post("/login/complete", async (req, res) => {
+router.post("/login/complete", rateLimiters.auth, async (req, res) => {
   try {
     const { sessionId } = req.body;
-
-    console.log("🔑 Login complete request for session:", sessionId);
 
     if (!sessionId) {
       return res.status(400).json({
@@ -288,26 +328,16 @@ router.post("/login/complete", async (req, res) => {
     const session = QRAuthManager.completeAuth(sessionId);
 
     if (!session) {
-      console.error("❌ Session not found or not verified:", sessionId);
-
-      // Debug: Check if session exists at all
-      const checkSession = QRAuthManager.getAuthSession(sessionId);
-      if (checkSession) {
-        console.error("Session exists but status is:", checkSession.status);
-      }
-
+      trackSuspiciousActivity(req.ip, "Invalid session");
       return res.status(401).json({
         success: false,
-        message: "Session not verified or expired. Please try again.",
+        message: "Session not verified or expired",
       });
     }
-
-    console.log("✅ Session found:", session);
 
     // Get user
     const user = await User.findById(session.userId);
     if (!user) {
-      console.error("❌ User not found:", session.userId);
       return res.status(401).json({
         success: false,
         message: "User not found",
@@ -320,8 +350,6 @@ router.post("/login/complete", async (req, res) => {
 
     // Generate token
     const token = generateToken(user._id);
-
-    console.log("✅ Login successful for:", user.email);
 
     res.json({
       success: true,
@@ -344,8 +372,6 @@ router.post("/login/complete", async (req, res) => {
 });
 
 // @route   GET /api/auth/me
-// @desc    Get current user
-// @access  Private
 router.get("/me", authMiddleware, async (req, res) => {
   try {
     const user = await User.findById(req.userId).select(
@@ -373,8 +399,6 @@ router.get("/me", authMiddleware, async (req, res) => {
 });
 
 // @route   GET /api/auth/verify
-// @desc    Verify Token
-// @access  Private
 router.get("/verify", authMiddleware, async (req, res) => {
   try {
     const user = await User.findById(req.userId).select(
@@ -406,23 +430,16 @@ router.get("/verify", authMiddleware, async (req, res) => {
 ================================ */
 
 // @route   POST /api/auth/update-face/initiate
-// @desc    Initiate face update - Generate QR for mobile
-// @access  Private
 router.post("/update-face/initiate", authMiddleware, async (req, res) => {
   try {
-    console.log("📸 Face update initiate request from user:", req.userId);
-
     // Find user
     const user = await User.findById(req.userId);
     if (!user) {
-      console.error("❌ User not found:", req.userId);
       return res.status(404).json({
         success: false,
         message: "User not found",
       });
     }
-
-    console.log("👤 User found:", user.email);
 
     // Generate QR session for face update
     const sessionId = QRAuthManager.generateAuthSession(
@@ -431,30 +448,24 @@ router.post("/update-face/initiate", authMiddleware, async (req, res) => {
       "update-face",
     );
 
-    console.log("✅ Face update session created:", sessionId);
-
     res.json({
       success: true,
       sessionId,
-      message: "Face update session created. Scan QR code with mobile device",
+      message: "Face update session created",
     });
   } catch (error) {
-    console.error("❌ Face update initiation error:", error);
+    console.error("Face update initiation error:", error);
     res.status(500).json({
       success: false,
-      message: "Server error during face update initiation",
+      message: "Server error",
     });
   }
 });
 
 // @route   POST /api/auth/update-face/complete
-// @desc    Complete face update after mobile capture
-// @access  Public
 router.post("/update-face/complete", async (req, res) => {
   try {
     const { sessionId } = req.body;
-
-    console.log("📸 Face update complete request for session:", sessionId);
 
     if (!sessionId) {
       return res.status(400).json({
@@ -467,21 +478,18 @@ router.post("/update-face/complete", async (req, res) => {
     const session = QRAuthManager.completeAuth(sessionId);
 
     if (!session) {
-      console.error("❌ Session not found or not verified:", sessionId);
       return res.status(401).json({
         success: false,
-        message: "Session not verified or expired. Please try again.",
+        message: "Session not verified or expired",
       });
     }
-
-    console.log("✅ Face update session verified");
 
     res.json({
       success: true,
       message: "Face update completed successfully",
     });
   } catch (error) {
-    console.error("❌ Face update completion error:", error);
+    console.error("Face update completion error:", error);
     res.status(500).json({
       success: false,
       message: "Server error",
@@ -494,86 +502,75 @@ router.post("/update-face/complete", async (req, res) => {
 ================================ */
 
 // @route   PUT /api/auth/change-password
-// @desc    Change user's password
-// @access  Private
-router.put("/change-password", authMiddleware, async (req, res) => {
-  try {
-    const { currentPassword, newPassword } = req.body;
+router.put(
+  "/change-password",
+  authMiddleware,
+  passwordChangeValidation,
+  async (req, res) => {
+    try {
+      // Check validation errors
+      const errors = validationResult(req);
+      if (!errors.isEmpty()) {
+        return res.status(400).json({
+          success: false,
+          message: errors.array()[0].msg,
+        });
+      }
 
-    console.log("🔑 Password change request from user:", req.userId);
+      const { currentPassword, newPassword } = req.body;
 
-    // Validation
-    if (!currentPassword || !newPassword) {
-      return res.status(400).json({
+      // Find user
+      const user = await User.findById(req.userId);
+      if (!user) {
+        return res.status(404).json({
+          success: false,
+          message: "User not found",
+        });
+      }
+
+      // Verify current password
+      const isMatch = await user.comparePassword(currentPassword);
+      if (!isMatch) {
+        trackSuspiciousActivity(req.ip, "Wrong current password");
+        return res.status(401).json({
+          success: false,
+          message: "Current password is incorrect",
+        });
+      }
+
+      // Check if new password is same as current
+      const isSamePassword = await bcrypt.compare(newPassword, user.password);
+      if (isSamePassword) {
+        return res.status(400).json({
+          success: false,
+          message: "New password must be different",
+        });
+      }
+
+      // Update password
+      user.password = newPassword;
+      await user.save();
+
+      res.json({
+        success: true,
+        message: "Password changed successfully",
+      });
+    } catch (error) {
+      console.error("Password change error:", error);
+      res.status(500).json({
         success: false,
-        message: "Please provide current and new password",
+        message: "Server error",
       });
     }
+  },
+);
 
-    if (newPassword.length < 8) {
-      return res.status(400).json({
-        success: false,
-        message: "New password must be at least 8 characters long",
-      });
-    }
-
-    // Find user
-    const user = await User.findById(req.userId);
-    if (!user) {
-      console.error("❌ User not found:", req.userId);
-      return res.status(404).json({
-        success: false,
-        message: "User not found",
-      });
-    }
-
-    console.log("👤 User found:", user.email);
-
-    // Verify current password
-    const isMatch = await user.comparePassword(currentPassword);
-    if (!isMatch) {
-      console.error("❌ Current password is incorrect for:", user.email);
-      return res.status(401).json({
-        success: false,
-        message: "Current password is incorrect",
-      });
-    }
-
-    console.log("✅ Current password verified");
-
-    // Check if new password is same as current
-    const isSamePassword = await bcrypt.compare(newPassword, user.password);
-    if (isSamePassword) {
-      console.error("❌ New password same as current for:", user.email);
-      return res.status(400).json({
-        success: false,
-        message: "New password must be different from current password",
-      });
-    }
-
-    // Update password (will be hashed by pre-save hook)
-    user.password = newPassword;
-    await user.save();
-
-    console.log("✅ Password changed successfully for:", user.email);
-
-    res.json({
-      success: true,
-      message: "Password changed successfully",
-    });
-  } catch (error) {
-    console.error("❌ Password change error:", error);
-    res.status(500).json({
-      success: false,
-      message: "Server error during password change",
-    });
-  }
-});
-
-// DEBUG: Get all sessions (remove in production)
-router.get("/debug/sessions", (req, res) => {
-  const sessions = QRAuthManager.getAllSessions();
-  res.json({ sessions });
-});
+// DEBUG ROUTE - Remove in production
+if (process.env.NODE_ENV !== "production") {
+  router.get("/debug/sessions", (req, res) => {
+    const sessions = QRAuthManager.getAllSessions();
+    res.json({ sessions });
+  });
+}
 
 module.exports = router;
